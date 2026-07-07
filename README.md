@@ -1,6 +1,16 @@
-# UniProxy
+# UniProxy - Learning-based
 
-This repository contains the source code for the paper "[UniProxy: Breaking the Per-Flow Barrier in Multipath Proxy Design](https://dl.acm.org/doi/abs/10.1145/3786293)" published in PACMNET (CoNEXT'26).
+This repository is a research fork and extended implementation based on the original [UniProxy repository](https://github.com/Liu-Jinhao/UniProxy).
+
+The original UniProxy was developed for the paper:
+
+> **UniProxy: Breaking the Per-Flow Barrier in Multipath Proxy Design**
+> Published in PACMNET (CoNEXT'26).
+> [Paper](https://dl.acm.org/doi/abs/10.1145/3786293)
+
+We gratefully acknowledge the original authors for releasing the UniProxy source code.
+
+This repository preserves the core UniProxy architecture and implementation while serving as a research platform for further investigation and development of multipath proxy and MPQUIC scheduling mechanisms. Modifications and extensions developed in this repository are maintained by the **QUIC-VN research group**.
 
 ## How to Use UniProxy
 
