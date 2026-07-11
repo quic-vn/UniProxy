@@ -1,8 +1,8 @@
 package quic
 
 import (
-	"time"
 	"sort"
+	"time"
 
 	"github.com/qdeconinck/mp-quic/ackhandler"
 	"github.com/qdeconinck/mp-quic/congestion"
@@ -24,14 +24,74 @@ type packedFrames struct {
 
 type scheduler struct {
 	// XXX Currently round-robin based, inspired from MPTCP scheduler
-	quotas map[protocol.PathID]uint
-	timer *time.Timer
+	quotas            map[protocol.PathID]uint
+	timer             *time.Timer
 	packetsNotSentYet map[protocol.PathID]*PacketList
+	lastMetricLog     time.Time
 }
 
-const SCHE_ALGO = "TRR" // TRR, RR, or SAPS
-const INTERVAL = 1 * time.Second
+const (
+	// Supported algorithms: TRR, X, RR, SAPS.
+	//
+	// X uses the complete TRR scheduling logic but obtains SmoothedRTT
+	// from the Kalman estimator instead of EWMA.
+	SCHE_ALGO = "X"
+
+	INTERVAL = 1 * time.Second
+
+	// Enable only during correctness/debug runs.
+	// Keep false during official performance measurements.
+	DEBUG_SCHED_METRICS  = false
+	DEBUG_SCHED_INTERVAL = 1 * time.Second
+
+	// This value identifies the integrated source-code version.
+	// The selected algorithm is printed separately.
+	BUILD_FINGERPRINT = "UNIPROXY_X_KALMAN_INTEGRATION_V1"
+)
+
 var PORTION map[*path]float32
+
+func init() {
+	var expectedMode congestion.RTTEstimatorMode
+
+	switch SCHE_ALGO {
+	case "X":
+		expectedMode = congestion.RTTEstimatorKalman
+
+	case "TRR", "RR", "SAPS":
+		expectedMode = congestion.RTTEstimatorEWMA
+
+	default:
+		panic("unsupported SCHE_ALGO: " + SCHE_ALGO)
+	}
+
+	if !congestion.SetRTTEstimatorMode(expectedMode) {
+		panic("failed to configure RTT estimator")
+	}
+
+	actualMode := congestion.GetRTTEstimatorMode()
+	if actualMode != expectedMode {
+		panic("RTT estimator mode does not match SCHE_ALGO")
+	}
+
+	println(
+		"[BUILD_CHECK]",
+		"fingerprint=", BUILD_FINGERPRINT,
+		"algo=", SCHE_ALGO,
+		"rtt_mode=", int(actualMode),
+	)
+}
+
+func isTRRLikeScheduler() bool {
+	return SCHE_ALGO == "TRR" || SCHE_ALGO == "X"
+}
+
+func effectiveSchedulerAlgo() string {
+	if SCHE_ALGO == "X" {
+		return "TRR"
+	}
+	return SCHE_ALGO
+}
 
 func (sch *scheduler) setup() {
 	sch.quotas = make(map[protocol.PathID]uint)
@@ -177,7 +237,7 @@ pathLoop:
 	for pathID, pth := range s.paths {
 		// Don't block path usage if we retransmit, even on another path
 		if !hasRetransmission && !pth.SendingAllowed() {
-			if SCHE_ALGO == "TRR" {
+			if isTRRLikeScheduler() {
 				pth.congestionlimited = time.Now()
 			}
 			continue pathLoop
@@ -240,7 +300,7 @@ func (sch *scheduler) sendingQueueEmpty(pth *path) bool {
 
 func (sch *scheduler) calculateArrivalTime(s *session, pth *path, addMeanDeviation bool) (time.Duration, bool) {
 
-	packetSize := protocol.MaxPacketSize * 8	//bit uint64
+	packetSize := protocol.MaxPacketSize * 8 //bit uint64
 	var pthBwd protocol.ByteCount
 	if pth.rttStats.SmoothedRTT() > 0 {
 		pthBwd = (pth.sentPacketHandler.GetCongestionWindow() * protocol.ByteCount(time.Second) * protocol.ByteCount(congestion.BytesPerSecond)) / protocol.ByteCount(pth.rttStats.SmoothedRTT())
@@ -399,15 +459,51 @@ pathLoop:
 	return selectedPath
 }
 
-// Lock of s.paths must be held
-func (sch *scheduler) selectPath(s *session, hasRetransmission bool, hasStreamRetransmission bool, fromPth *path) *path {
-	// XXX Currently round-robin
-	// TODO select the right scheduler dynamically
-	if SCHE_ALGO == "SAPS" {
-		return sch.selectPathByArrivalTime(s, hasRetransmission, hasStreamRetransmission, fromPth)
+// // Lock of s.paths must be held
+//
+//	func (sch *scheduler) selectPath(s *session, hasRetransmission bool, hasStreamRetransmission bool, fromPth *path) *path {
+//		// XXX Currently round-robin
+//		// TODO select the right scheduler dynamically
+//		if SCHE_ALGO == "SAPS" {
+//			return sch.selectPathByArrivalTime(s, hasRetransmission, hasStreamRetransmission, fromPth)
+//		}
+//		return sch.selectPathLowLatency(s, hasRetransmission, hasStreamRetransmission, fromPth)
+//		// return sch.selectPathRoundRobin(s, hasRetransmission, hasStreamRetransmission, fromPth)
+//	}
+func (sch *scheduler) selectPath(
+	s *session,
+	hasRetransmission bool,
+	hasStreamRetransmission bool,
+	fromPth *path,
+) *path {
+	switch effectiveSchedulerAlgo() {
+	case "SAPS":
+		return sch.selectPathByArrivalTime(
+			s,
+			hasRetransmission,
+			hasStreamRetransmission,
+			fromPth,
+		)
+
+	case "RR":
+		return sch.selectPathRoundRobin(
+			s,
+			hasRetransmission,
+			hasStreamRetransmission,
+			fromPth,
+		)
+
+	case "TRR":
+		return sch.selectPathLowLatency(
+			s,
+			hasRetransmission,
+			hasStreamRetransmission,
+			fromPth,
+		)
+
+	default:
+		panic("unreachable scheduler algorithm: " + SCHE_ALGO)
 	}
-	return sch.selectPathLowLatency(s, hasRetransmission, hasStreamRetransmission, fromPth)
-	// return sch.selectPathRoundRobin(s, hasRetransmission, hasStreamRetransmission, fromPth)
 }
 
 // Lock of s.paths must be free (in case of log print)
@@ -419,7 +515,7 @@ func (sch *scheduler) performPacketSending(s *session, windowUpdateFrames []*wir
 	var err error
 	var packet *packedPacket
 
-	if SCHE_ALGO == "SAPS" {
+	if effectiveSchedulerAlgo() == "SAPS" {
 		if pth.SendingAllowed() && sch.sendingQueueEmpty(pth) { //normally
 			packet, err = s.packer.PackPacket(pth)
 			if err != nil || packet == nil {
@@ -444,7 +540,7 @@ func (sch *scheduler) performPacketSending(s *session, windowUpdateFrames []*wir
 			return nil, false, err
 		}
 	}
-	
+
 	if err = s.sendPackedPacket(packet, pth); err != nil {
 		return nil, false, err
 	}
@@ -537,11 +633,14 @@ func (sch *scheduler) ackRemainingPaths(s *session, totalWindowUpdateFrames []*w
 }
 
 func (sch *scheduler) streamAllocation(strm *stream, s *session) {
-	if strm.streamID == 1 {
+	if strm == nil || strm.streamID == 1 {
 		return
 	}
 	var bestpath *path
 	for _, pth := range s.paths {
+		if pth == nil {
+			continue
+		}
 		if pth.pathID == protocol.InitialPathID || pth.potentiallyFailed.Get() {
 			continue
 		}
@@ -549,9 +648,14 @@ func (sch *scheduler) streamAllocation(strm *stream, s *session) {
 			bestpath = pth
 			continue
 		}
-		if pth.rttStats.SmoothedRTT() != 0 && pth.rttStats.SmoothedRTT() < bestpath.rttStats.SmoothedRTT() {
+		bestRTT := bestpath.rttStats.SmoothedRTT()
+		currentRTT := pth.rttStats.SmoothedRTT()
+
+		if currentRTT != 0 &&
+			(bestRTT == 0 || currentRTT < bestRTT) {
+
 			bestpath = pth
-		}	
+		}
 	}
 	strm.path = bestpath
 }
@@ -567,7 +671,7 @@ func (sch *scheduler) adjustAllocation(s *session) {
 		}
 		stream := s.streamsMap.streams[streamID]
 		// utils.Infof("stream %v path %v token %v", stream.streamID, stream.path.pathID, stream.token)
-		for pathID, pkt := range stream.packetSent{
+		for pathID, pkt := range stream.packetSent {
 			// utils.Infof("stream %v sent %v packets on path %v", stream.streamID, pkt, pathID)
 			packetAcSent[pathID] += pkt
 			packetShSent[stream.path.pathID] += pkt
@@ -596,7 +700,7 @@ func (sch *scheduler) adjustAllocation(s *session) {
 
 	var delta int
 	for i, pth := range paths_RTT {
-		if i == len(paths_RTT) - 1 {
+		if i == len(paths_RTT)-1 {
 			break
 		}
 
@@ -641,7 +745,7 @@ func (sch *scheduler) adjustAllocation(s *session) {
 				if stream.path.rttStats.SmoothedRTT() <= pth.rttStats.SmoothedRTT() {
 					continue
 				}
-				if stream.path != pth && packetSent[streamID] + delta <= 0 {
+				if stream.path != pth && packetSent[streamID]+delta <= 0 {
 					if stream_tbd == nil || packetSent[streamID] > packetSent[stream_tbd.streamID] {
 						stream_tbd = stream
 					}
@@ -674,7 +778,7 @@ func (sch *scheduler) adjustAllocation(s *session) {
 		}
 		stream := s.streamsMap.streams[streamID]
 		if float32(packetSent[streamID])/float32(packetShSent[stream.path.pathID]) > PORTION[stream.path] {
-			PORTION[stream.path] = float32(packetSent[streamID])/float32(packetShSent[stream.path.pathID])
+			PORTION[stream.path] = float32(packetSent[streamID]) / float32(packetShSent[stream.path.pathID])
 		}
 	}
 }
@@ -686,11 +790,100 @@ func (sch *scheduler) resetStatistics(s *session) {
 		sch.timer.Reset(INTERVAL)
 	}
 	for _, streamID := range s.streamsMap.openStreams {
-	if streamID == 1 {
-		continue
+		if streamID == 1 {
+			continue
+		}
+		stream := s.streamsMap.streams[streamID]
+		stream.packetSent = make(map[protocol.PathID]int)
 	}
-	stream := s.streamsMap.streams[streamID]
-	stream.packetSent = make(map[protocol.PathID]int)
+}
+
+func (sch *scheduler) logPathMetrics(s *session, selected *path, tag string) {
+	if !DEBUG_SCHED_METRICS {
+		return
+	}
+
+	now := time.Now()
+	if !sch.lastMetricLog.IsZero() && now.Sub(sch.lastMetricLog) < DEBUG_SCHED_INTERVAL {
+		return
+	}
+	sch.lastMetricLog = now
+
+	s.pathsLock.RLock()
+	defer s.pathsLock.RUnlock()
+
+	for pathID, pth := range s.paths {
+		if pth == nil {
+			continue
+		}
+
+		if pathID == protocol.InitialPathID {
+			continue
+		}
+
+		sentPkts, sentRetrans, sentLost := pth.sentPacketHandler.GetStatistics()
+		rcvPkts := pth.receivedPacketHandler.GetStatistics()
+
+		selectedFlag := false
+		if selected != nil && selected == pth {
+			selectedFlag = true
+		}
+
+		utils.Infof(
+			"[SCHED_METRIC] algo=%s tag=%s path=%d selected=%t sending_allowed=%t failed=%t latest_rtt_ms=%d smoothed_rtt_ms=%d mean_dev_ms=%d min_rtt_ms=%d cwnd=%d sent=%d retrans=%d lost=%d rcv=%d quota=%d",
+			SCHE_ALGO,
+			tag,
+			pathID,
+			selectedFlag,
+			pth.SendingAllowed(),
+			pth.potentiallyFailed.Get(),
+			pth.rttStats.LatestRTT()/time.Millisecond,
+			pth.rttStats.SmoothedRTT()/time.Millisecond,
+			pth.rttStats.MeanDeviation()/time.Millisecond,
+			pth.rttStats.MinRTT()/time.Millisecond,
+			pth.sentPacketHandler.GetCongestionWindow(),
+			sentPkts,
+			sentRetrans,
+			sentLost,
+			rcvPkts,
+			sch.quotas[pathID],
+		)
+	}
+}
+
+func (sch *scheduler) logStreamMetrics(s *session, tag string) {
+	if !DEBUG_SCHED_METRICS {
+		return
+	}
+
+	for _, streamID := range s.streamsMap.openStreams {
+		if streamID == 1 {
+			continue
+		}
+
+		strm := s.streamsMap.streams[streamID]
+		if strm == nil {
+			continue
+		}
+
+		assignedPath := protocol.PathID(255)
+		if strm.path != nil {
+			assignedPath = strm.path.pathID
+		}
+
+		totalPackets := 0
+		for _, pkt := range strm.packetSent {
+			totalPackets += pkt
+		}
+
+		utils.Infof(
+			"[STREAM_METRIC] algo=%s tag=%s stream=%d assigned_path=%d packets_in_interval=%d",
+			SCHE_ALGO,
+			tag,
+			strm.streamID,
+			assignedPath,
+			totalPackets,
+		)
 	}
 }
 
@@ -715,15 +908,24 @@ func (sch *scheduler) sendPacket(s *session) error {
 
 	for {
 		// Allocate path bandwidth to streams periodcally
-		if SCHE_ALGO == "TRR" {
+		if isTRRLikeScheduler() {
 			if sch.timer == nil {
 				sch.timer = time.NewTimer(INTERVAL)
 			}
+
 			select {
-			case <- sch.timer.C:
-				//utils.Infof("Timeout adjust allocation")
+			case <-sch.timer.C:
 				sch.adjustAllocation(s)
+
+				if DEBUG_SCHED_METRICS {
+					sch.logStreamMetrics(
+						s,
+						"after_adjust",
+					)
+				}
+
 				sch.resetStatistics(s)
+
 			default:
 			}
 		}
