@@ -1,10 +1,10 @@
 package quic
 
 import (
-	"time"
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	//"github.com/qdeconinck/mp-quic/internal/utils"
 	"github.com/qdeconinck/mp-quic/internal/handshake"
@@ -13,7 +13,7 @@ import (
 )
 
 type streamsMap struct {
-	mutex sync.RWMutex
+	mutex   sync.RWMutex
 	session *session
 
 	perspective          protocol.Perspective
@@ -47,7 +47,7 @@ var (
 
 func newStreamsMap(newStream newStreamLambda, pers protocol.Perspective, connectionParameters handshake.ConnectionParametersManager, sess *session) *streamsMap {
 	sm := streamsMap{
-		session:			  sess,
+		session:              sess,
 		perspective:          pers,
 		streams:              map[protocol.StreamID]*stream{},
 		openStreams:          make([]protocol.StreamID, 0),
@@ -249,7 +249,7 @@ func (m *streamsMap) RoundRobinIterate(fn streamLambda) error {
 	for i := uint32(0); i < numStreams; i++ {
 		streamID := m.openStreams[(m.roundRobinIndex)%numStreams]
 		m.roundRobinIndex = (m.roundRobinIndex + 1) % numStreams
-		
+
 		if streamID == 1 {
 			continue
 		}
@@ -308,13 +308,13 @@ func (m *streamsMap) getStreamForPath(pth *path) *stream {
 		}
 		if currentRTT > 0 {
 			bandwidth := path.sentPacketHandler.GetCongestionWindow() / protocol.ByteCount(currentRTT/time.Millisecond)
-			if float32(bandwidth) * PORTION[path] > max_bandwidth {
+			if float32(bandwidth)*PORTION[path] > max_bandwidth {
 				max_bandwidth = float32(bandwidth) * PORTION[path]
 			}
 		}
 	}
 	threshold := int(max_bandwidth * float32(maxRTT/time.Millisecond) / float32(protocol.MaxPacketSize))
-	
+
 	var stream1 *stream
 	var stream2 *stream
 	index1 := -1
@@ -397,7 +397,7 @@ func (m *streamsMap) getStreamForPath(pth *path) *stream {
 		pth.bandwidthshared = now
 		return stream2
 	}
-	
+
 	if index1 == -1 {
 		if index2 == -1 {
 			return nil
@@ -438,9 +438,21 @@ func (m *streamsMap) putStream(s *stream) error {
 		return fmt.Errorf("a stream with ID %d already exists", id)
 	}
 
-	if SCHE_ALGO == "TRR" {
+	// Original UniProxy behavior:
+	// Only TRR streams were assigned to a path using streamAllocation().
+	//
+	// if SCHE_ALGO == "TRR" {
+	// 	m.session.scheduler.streamAllocation(s, m.session)
+	// }
+
+	// Updated behavior for algorithm X:
+	// TRR and X use the same stream-allocation logic.
+	// X differs from TRR only in the RTT estimator:
+	// TRR uses EWMA, while X uses Kalman.
+	if isTRRLikeScheduler() {
 		m.session.scheduler.streamAllocation(s, m.session)
 	}
+
 	m.streams[id] = s
 	m.openStreams = append(m.openStreams, id)
 	return nil

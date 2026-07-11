@@ -220,7 +220,19 @@ func (f *streamFramer) maybePopNormalFrames(maxBytes protocol.ByteCount, pth *pa
 		// 	}
 		// 	s.endStat = true
 		// }
-		if SCHE_ALGO == "TRR" {
+		// if SCHE_ALGO == "TRR" {
+		// 	if !s.hasUnsentData() && time.Since(s.noDataTime) <= pth.rttStats.SmoothedRTT() {
+		// 		s.token = 0
+		// 		s.noDataTime = time.Now()
+		// 	} else {
+		// 		s.token -= 1
+		// 	}
+		// 	s.packetSent[pth.pathID] += 1
+		// }
+
+		// TRR and X share the same token-based stream scheduling logic.
+		// X differs only by using Kalman-smoothed RTT instead of EWMA.
+		if isTRRLikeScheduler() {
 			if !s.hasUnsentData() && time.Since(s.noDataTime) <= pth.rttStats.SmoothedRTT() {
 				s.token = 0
 				s.noDataTime = time.Now()
@@ -250,7 +262,14 @@ func (f *streamFramer) maybePopNormalFrames(maxBytes protocol.ByteCount, pth *pa
 		return true, nil
 	}
 
-	if SCHE_ALGO == "TRR" {
+	// if SCHE_ALGO == "TRR" {
+	// 	f.streamsMap.TokenRoundRobinIterate(fn, pth)
+	// } else {
+	// 	f.streamsMap.RoundRobinIterate(fn)
+	// }
+
+	// TRR and X share the same token-based stream scheduling logic.
+	if isTRRLikeScheduler() {
 		f.streamsMap.TokenRoundRobinIterate(fn, pth)
 	} else {
 		f.streamsMap.RoundRobinIterate(fn)
