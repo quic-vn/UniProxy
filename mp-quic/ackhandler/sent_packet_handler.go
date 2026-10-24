@@ -508,8 +508,12 @@ func (h *sentPacketHandler) GetStopWaitingFrame(force bool) *wire.StopWaitingFra
 }
 
 // Get congestion window
-func (h *sentPacketHandler) GetCongestionWindow() protocol.ByteCount{
+func (h *sentPacketHandler) GetCongestionWindow() protocol.ByteCount {
 	return h.congestion.GetCongestionWindow()
+}
+
+func (h *sentPacketHandler) GetBytesInFlight() protocol.ByteCount {
+	return h.bytesInFlight
 }
 
 // Set the number of emulated connections

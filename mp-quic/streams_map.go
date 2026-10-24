@@ -1,10 +1,10 @@
 package quic
 
 import (
-	"time"
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	//"github.com/qdeconinck/mp-quic/internal/utils"
 	"github.com/qdeconinck/mp-quic/internal/handshake"
@@ -13,7 +13,7 @@ import (
 )
 
 type streamsMap struct {
-	mutex sync.RWMutex
+	mutex   sync.RWMutex
 	session *session
 
 	perspective          protocol.Perspective
@@ -47,7 +47,7 @@ var (
 
 func newStreamsMap(newStream newStreamLambda, pers protocol.Perspective, connectionParameters handshake.ConnectionParametersManager, sess *session) *streamsMap {
 	sm := streamsMap{
-		session:			  sess,
+		session:              sess,
 		perspective:          pers,
 		streams:              map[protocol.StreamID]*stream{},
 		openStreams:          make([]protocol.StreamID, 0),
@@ -249,7 +249,7 @@ func (m *streamsMap) RoundRobinIterate(fn streamLambda) error {
 	for i := uint32(0); i < numStreams; i++ {
 		streamID := m.openStreams[(m.roundRobinIndex)%numStreams]
 		m.roundRobinIndex = (m.roundRobinIndex + 1) % numStreams
-		
+
 		if streamID == 1 {
 			continue
 		}
@@ -298,8 +298,9 @@ func (m *streamsMap) TokenRoundRobinIterate(fn streamLambda, pth *path) error {
 func (m *streamsMap) getStreamForPath(pth *path) *stream {
 	var max_bandwidth float32 = 0
 	var maxRTT time.Duration = 0
-	for pathID, path := range pth.sess.paths {
-		if pathID == protocol.InitialPathID || path.potentiallyFailed.Get() {
+	for _, path := range pth.sess.paths {
+
+		if !pathUsable(path) {
 			continue
 		}
 		currentRTT := path.rttStats.SmoothedRTT()
@@ -308,13 +309,13 @@ func (m *streamsMap) getStreamForPath(pth *path) *stream {
 		}
 		if currentRTT > 0 {
 			bandwidth := path.sentPacketHandler.GetCongestionWindow() / protocol.ByteCount(currentRTT/time.Millisecond)
-			if float32(bandwidth) * PORTION[path] > max_bandwidth {
+			if float32(bandwidth)*PORTION[path] > max_bandwidth {
 				max_bandwidth = float32(bandwidth) * PORTION[path]
 			}
 		}
 	}
 	threshold := int(max_bandwidth * float32(maxRTT/time.Millisecond) / float32(protocol.MaxPacketSize))
-	
+
 	var stream1 *stream
 	var stream2 *stream
 	index1 := -1
@@ -353,9 +354,10 @@ func (m *streamsMap) getStreamForPath(pth *path) *stream {
 					stream1 = stream
 				} else if idlePath && stream2 == nil {
 					curRTT := stream.path.rttStats.SmoothedRTT()
-					if curRTT < pthRTT && now.Sub(stream.noDataTime) <= curRTT {
+					if !stream.path.unreliable.Get() && curRTT < pthRTT && now.Sub(stream.noDataTime) <= curRTT {
 						continue
 					}
+
 					if stream.token > 0 {
 						stream2 = stream
 					} else {
@@ -397,7 +399,7 @@ func (m *streamsMap) getStreamForPath(pth *path) *stream {
 		pth.bandwidthshared = now
 		return stream2
 	}
-	
+
 	if index1 == -1 {
 		if index2 == -1 {
 			return nil

@@ -5,10 +5,10 @@ import (
 
 	"github.com/qdeconinck/mp-quic/ackhandler"
 	"github.com/qdeconinck/mp-quic/congestion"
-	"github.com/qdeconinck/mp-quic/qerr"
 	"github.com/qdeconinck/mp-quic/internal/protocol"
 	"github.com/qdeconinck/mp-quic/internal/utils"
 	"github.com/qdeconinck/mp-quic/internal/wire"
+	"github.com/qdeconinck/mp-quic/qerr"
 )
 
 const (
@@ -33,7 +33,7 @@ type path struct {
 
 	potentiallyFailed utils.AtomicBool
 
-	sentPacket          chan struct{}
+	sentPacket chan struct{}
 
 	// It is now the responsibility of the path to keep its packet number
 	packetNumberGenerator *packetNumberGenerator
@@ -47,10 +47,15 @@ type path struct {
 
 	lastNetworkActivityTime time.Time
 
-	timer           *utils.Timer
+	timer *utils.Timer
 
 	congestionlimited time.Time
-	bandwidthshared time.Time
+	bandwidthshared   time.Time
+	// FQSAT: path bị đánh giá là không đáng tin, vai trò giống potentiallyFailed
+	unreliable utils.AtomicBool
+	// FQSAT: thăm dò bằng PING (sửa 2) – lần gửi PING thăm dò và lần nhận ACK gần nhất
+	lastProbe time.Time
+	lastAck   time.Time
 }
 
 // setup initializes values that are independent of the perspective
@@ -82,6 +87,7 @@ func (p *path) setup(oliaSenders map[protocol.PathID]*congestion.OliaSender) {
 
 	p.open.Set(true)
 	p.potentiallyFailed.Set(false)
+	p.unreliable.Set(false)
 
 	p.congestionlimited = time.Now()
 	p.bandwidthshared = time.Now()

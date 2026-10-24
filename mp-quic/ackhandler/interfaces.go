@@ -32,6 +32,7 @@ type SentPacketHandler interface {
 
 	// Get congestion window
 	GetCongestionWindow() protocol.ByteCount
+	GetBytesInFlight() protocol.ByteCount
 	SetNumEmulatedConnections(n float32)
 }
 

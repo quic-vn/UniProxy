@@ -6,9 +6,9 @@ import (
 	"fmt"
 
 	"github.com/qdeconinck/mp-quic/ackhandler"
-	"github.com/qdeconinck/mp-quic/internal/utils"
 	"github.com/qdeconinck/mp-quic/internal/handshake"
 	"github.com/qdeconinck/mp-quic/internal/protocol"
+	"github.com/qdeconinck/mp-quic/internal/utils"
 	"github.com/qdeconinck/mp-quic/internal/wire"
 )
 
@@ -25,8 +25,8 @@ type packetPacker struct {
 	version      protocol.VersionNumber
 	cryptoSetup  handshake.CryptoSetup
 
-	connectionParameters  handshake.ConnectionParametersManager
-	streamFramer          *streamFramer
+	connectionParameters handshake.ConnectionParametersManager
+	streamFramer         *streamFramer
 
 	controlFrames []wire.Frame
 	stopWaiting   map[protocol.PathID]*wire.StopWaitingFrame
@@ -41,14 +41,14 @@ func newPacketPacker(connectionID protocol.ConnectionID,
 	version protocol.VersionNumber,
 ) *packetPacker {
 	return &packetPacker{
-		cryptoSetup:           cryptoSetup,
-		connectionID:          connectionID,
-		connectionParameters:  connectionParameters,
-		perspective:           perspective,
-		version:               version,
-		streamFramer:          streamFramer,
-		stopWaiting:           make(map[protocol.PathID]*wire.StopWaitingFrame),
-		ackFrame:              make(map[protocol.PathID]*wire.AckFrame),
+		cryptoSetup:          cryptoSetup,
+		connectionID:         connectionID,
+		connectionParameters: connectionParameters,
+		perspective:          perspective,
+		version:              version,
+		streamFramer:         streamFramer,
+		stopWaiting:          make(map[protocol.PathID]*wire.StopWaitingFrame),
+		ackFrame:             make(map[protocol.PathID]*wire.AckFrame),
 	}
 }
 
@@ -72,6 +72,32 @@ func (p *packetPacker) PackPing(pf *wire.PingFrame, pth *path) (*packedPacket, e
 	pth.SetLeastUnacked(pth.sentPacketHandler.GetLeastUnacked())
 	p.controlFrames = append([]wire.Frame{pf}, p.controlFrames...)
 	return p.PackPacket(pth)
+}
+
+// PackPurePing (FQSAT sửa 2): gói chỉ gồm PING, kèm ACK/StopWaiting đang chờ của path đó nếu có.
+// Khác PackPing/PackPacket: không đụng tới controlFrames dùng chung giữa các path, và không
+// làm mất ackFrame đang chờ (PackPacket nhánh PING xoá ackFrame mà không gửi).
+func (p *packetPacker) PackPurePing(pth *path) (*packedPacket, error) {
+	encLevel, sealer := p.cryptoSetup.GetSealer()
+	ph := p.getPublicHeader(encLevel, pth)
+	frames := []wire.Frame{&wire.PingFrame{}}
+	if p.ackFrame[pth.pathID] != nil {
+		frames = append(frames, p.ackFrame[pth.pathID])
+		p.ackFrame[pth.pathID] = nil
+	}
+	if p.stopWaiting[pth.pathID] != nil {
+		p.stopWaiting[pth.pathID].PacketNumber = ph.PacketNumber
+		p.stopWaiting[pth.pathID].PacketNumberLen = ph.PacketNumberLen
+		frames = append(frames, p.stopWaiting[pth.pathID])
+		p.stopWaiting[pth.pathID] = nil
+	}
+	raw, err := p.writeAndSealPacket(ph, frames, sealer, pth)
+	return &packedPacket{
+		number:          ph.PacketNumber,
+		raw:             raw,
+		frames:          frames,
+		encryptionLevel: encLevel,
+	}, err
 }
 
 func (p *packetPacker) PackAckPacket(pth *path) (*packedPacket, error) {
@@ -258,7 +284,7 @@ func (p *packetPacker) composeNextPacket(
 	// however, for the last StreamFrame in the packet, we can omit the DataLen, thus saving 2 bytes and yielding a packet of exactly the correct size
 	maxFrameSize += 2
 
-	fs := p.streamFramer.PopStreamFrames(maxFrameSize - payloadLength, pth)
+	fs := p.streamFramer.PopStreamFrames(maxFrameSize-payloadLength, pth)
 	if len(fs) != 0 {
 		fs[len(fs)-1].DataLenPresent = false
 	}

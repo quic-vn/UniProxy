@@ -36,7 +36,7 @@ const ReceiveStreamFlowControlWindow = (1 << 10) * 32 // 32 kB
 
 // ReceiveConnectionFlowControlWindow is the connection-level flow control window for receiving data
 // This is the value that Google servers are using
-const ReceiveConnectionFlowControlWindow = 1 * (1 << 20) // 1 MB
+const ReceiveConnectionFlowControlWindow = 1048576 // 1 MB
 
 // DefaultMaxReceiveStreamFlowControlWindowServer is the default maximum stream-level flow control window for receiving data, for the server
 // This is the value that Google servers are using
@@ -44,7 +44,7 @@ const DefaultMaxReceiveStreamFlowControlWindowServer = 1 * (1 << 20) // 1 MB
 
 // DefaultMaxReceiveConnectionFlowControlWindowServer is the default connection-level flow control window for receiving data, for the server
 // This is the value that Google servers are using
-const DefaultMaxReceiveConnectionFlowControlWindowServer = 1 * (1 << 20) // 1 MB
+const DefaultMaxReceiveConnectionFlowControlWindowServer = 1048576 // 1 MB
 
 // DefaultMaxReceiveStreamFlowControlWindowClient is the default maximum stream-level flow control window for receiving data, for the client
 // This is the value that Chromium is using
@@ -52,7 +52,7 @@ const DefaultMaxReceiveStreamFlowControlWindowClient = 16 * (1 << 20) // 16 MB
 
 // DefaultMaxReceiveConnectionFlowControlWindowClient is the default connection-level flow control window for receiving data, for the client
 // This is the value that Google servers are using
-const DefaultMaxReceiveConnectionFlowControlWindowClient = 1 * (1 << 20) // 1 MB
+const DefaultMaxReceiveConnectionFlowControlWindowClient = 1048576 // 1 MB
 
 // ConnectionFlowControlMultiplier determines how much larger the connection flow control windows needs to be relative to any stream's flow control window
 // This is the value that Chromium is using

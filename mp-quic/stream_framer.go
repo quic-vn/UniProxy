@@ -186,6 +186,7 @@ func (f *streamFramer) maybePopNormalFrames(maxBytes protocol.ByteCount, pth *pa
 		if flowcontrol.FLOW_CONTROL == "Connection" {
 			sendWindowSize = f.flowControlManager.RemainingConnectionWindowSize()
 			if sendWindowSize == 0 {
+				f.noteFCBlocked() // FQSAT sửa 1: muốn gửi nhưng cửa sổ nhận đã cạn
 				return false, nil
 			}
 		} else if flowcontrol.FLOW_CONTROL == "Stream" {
@@ -233,6 +234,7 @@ func (f *streamFramer) maybePopNormalFrames(maxBytes protocol.ByteCount, pth *pa
 		// Finally, check if we are now FC blocked and should queue a BLOCKED frame
 		if f.flowControlManager.RemainingConnectionWindowSize() == 0 && flowcontrol.FLOW_CONTROL == "Connection" {
 			// We are now connection-level FC blocked
+			f.noteFCBlocked() // FQSAT sửa 1
 			f.blockedFrameQueue = append(f.blockedFrameQueue, &wire.BlockedFrame{StreamID: 0})
 		} else if !frame.FinBit && sendWindowSize-frame.DataLen() == 0 && flowcontrol.FLOW_CONTROL == "Stream" {
 			// We are now stream-level FC blocked
@@ -257,6 +259,14 @@ func (f *streamFramer) maybePopNormalFrames(maxBytes protocol.ByteCount, pth *pa
 	}
 
 	return
+}
+
+// noteFCBlocked (FQSAT sửa 1): ghi lại thời điểm kết nối bị flow control cấp connection chặn.
+// updateReliability chỉ gắn cờ unreliable khi việc này xảy ra gần đây (cửa sổ nhận là nút thắt).
+func (f *streamFramer) noteFCBlocked() {
+	if f.streamsMap != nil && f.streamsMap.session != nil && f.streamsMap.session.scheduler != nil {
+		f.streamsMap.session.scheduler.fcBlockedAt = time.Now()
+	}
 }
 
 // maybeSplitOffFrame removes the first n bytes and returns them as a separate frame. If n >= len(frame), nil is returned and nothing is modified.

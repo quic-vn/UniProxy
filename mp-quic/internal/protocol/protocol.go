@@ -56,7 +56,7 @@ const MaxCongestionWindowPackets = 10000
 const InitialStreamFlowControlWindow ByteCount = (1 << 14) // 16 kB
 
 // InitialConnectionFlowControlWindow is the initial connection-level flow control window for sending
-const InitialConnectionFlowControlWindow ByteCount = 1 * (1 << 20) // 1 MB
+const InitialConnectionFlowControlWindow ByteCount = 1048576 // 1 MB
 
 // ClientHelloMinimumSize is the minimum size the server expects an inchoate CHLO to have.
 const ClientHelloMinimumSize = 1024

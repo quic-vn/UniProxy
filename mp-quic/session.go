@@ -58,9 +58,9 @@ type session struct {
 	version      protocol.VersionNumber
 	config       *Config
 
-	paths        map[protocol.PathID]*path
-	closedPaths  map[protocol.PathID]bool
-	pathsLock    sync.RWMutex
+	paths       map[protocol.PathID]*path
+	closedPaths map[protocol.PathID]bool
+	pathsLock   sync.RWMutex
 
 	createPaths bool
 
@@ -71,7 +71,7 @@ type session struct {
 	remoteRTTs         map[protocol.PathID]time.Duration
 	lastPathsFrameSent time.Time
 
-	streamFramer          *streamFramer
+	streamFramer *streamFramer
 
 	flowControlManager flowcontrol.FlowControlManager
 
@@ -113,7 +113,7 @@ type session struct {
 	sessionCreationTime     time.Time
 	lastNetworkActivityTime time.Time
 
-	timer           *utils.Timer
+	timer *utils.Timer
 	// keepAlivePingSent stores whether a Ping frame was sent to the peer or not
 	// it is reset as soon as we receive a packet from the peer
 	keepAlivePingSent bool
@@ -123,7 +123,7 @@ type session struct {
 	pathManager         *pathManager
 	pathManagerLaunched bool
 
-	scheduler           *scheduler
+	scheduler *scheduler
 }
 
 var _ Session = &session{}
@@ -372,9 +372,9 @@ runLoop:
 				// begins with the public header and we never copy it.
 				putPacketBuffer(p.publicHeader.Raw)
 				select {
-					case p = <- s.receivedPackets:
-					default:
-						break recvLoop
+				case p = <-s.receivedPackets:
+				default:
+					break recvLoop
 				}
 			}
 		case l, ok := <-aeadChanged:
@@ -432,7 +432,7 @@ runLoop:
 		}
 
 		// Check if we should send a PATHS frame (currently hardcoded at 200 ms) only when at least one stream is open (not counting streams 1 and 3 never closed...)
-		if s.handshakeComplete && s.version >= protocol.VersionMP && now.Sub(s.lastPathsFrameSent) >= 200 * time.Millisecond && len(s.streamsMap.openStreams) > 2 {
+		if s.handshakeComplete && s.version >= protocol.VersionMP && now.Sub(s.lastPathsFrameSent) >= 200*time.Millisecond && len(s.streamsMap.openStreams) > 2 {
 			s.schedulePathsFrame()
 		}
 
@@ -495,7 +495,7 @@ func (s *session) handlePacketImpl(p *receivedPacket) error {
 	s.keepAlivePingSent = false
 
 	var pth *path
-	var ok  bool
+	var ok bool
 	var err error
 
 	pth, ok = s.paths[p.publicHeader.PathID]
@@ -545,7 +545,7 @@ func (s *session) handleFrames(fs []wire.Frame, p *path) error {
 			s.pathsLock.RLock()
 			for i := 0; i < int(frame.NumPaths); i++ {
 				s.remoteRTTs[frame.PathIDs[i]] = frame.RemoteRTTs[i]
-				if frame.RemoteRTTs[i] >= 30 * time.Minute {
+				if frame.RemoteRTTs[i] >= 30*time.Minute {
 					// Path is potentially failed
 					path, ok := s.paths[frame.PathIDs[i]]
 					if ok {
@@ -647,6 +647,13 @@ func (s *session) handleAckFrame(frame *wire.AckFrame) error {
 		// Update the session RTT, which comes to take the max RTT on all paths
 		s.rttStats.UpdateSessionRTT(pth.rttStats.SmoothedRTT())
 	}
+	// if err == nil && FQ_ENABLE && SCHE_ALGO == "TRR" && pth.pathID != protocol.InitialPathID {
+	// 	s.scheduler.learnFromAck(s, pth)
+	// }
+	if err == nil && FQ_ENABLE && SCHE_ALGO == "TRR" && pth.pathID != protocol.InitialPathID {
+		pth.lastAck = time.Now() // FQSAT sửa 2: path vừa có ACK thì chưa cần PING thăm dò
+		s.scheduler.learnFromAck(s, pth)
+	}
 	return err
 }
 
@@ -709,7 +716,7 @@ func (s *session) closePaths() {
 		s.pathsLock.RLock()
 		for _, pth := range s.paths {
 			select {
-			case pth.closeChan<-nil:
+			case pth.closeChan <- nil:
 			default:
 				// Don't block
 			}
@@ -797,7 +804,7 @@ func (s *session) sendPackedPacket(packet *packedPacket, pth *path) error {
 	if err != nil {
 		return err
 	}
-	pth.sentPacket<-struct{}{}
+	pth.sentPacket <- struct{}{}
 
 	s.logPacket(packet, pth.pathID)
 	return pth.conn.Write(packet.raw)
@@ -815,6 +822,19 @@ func (s *session) sendConnectionClose(quicErr *qerr.QuicError) error {
 	s.logPacket(packet, protocol.InitialPathID)
 	// XXX (QDC): seems reasonable to send on pathID 0, but this can change
 	return s.paths[protocol.InitialPathID].conn.Write(packet.raw)
+}
+
+// sendProbePing (FQSAT sửa 2): PING thuần để lấy mẫu RTT/loss trên path, không kèm dữ liệu,
+// không bỏ qua ACK đang chờ. Bỏ qua path đã đóng (ghi vào pth.sentPacket sẽ treo vĩnh viễn).
+func (s *session) sendProbePing(pth *path) error {
+	if !pth.open.Get() {
+		return nil
+	}
+	packet, err := s.packer.PackPurePing(pth)
+	if err != nil || packet == nil {
+		return err
+	}
+	return s.sendPackedPacket(packet, pth)
 }
 
 func (s *session) sendPing(pth *path) error {

@@ -49,6 +49,7 @@ def request_fixed_rate(rate, interval):
 
 if __name__ == "__main__":
     num = 5
+    # num = 10  #(Number of threads to run concurrently)
     throughput = 0
     request_fixed_rate(RATE_MAX, INTERVAL)
     time.sleep(3)
