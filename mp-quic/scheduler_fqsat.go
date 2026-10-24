@@ -172,14 +172,30 @@ func (sch *scheduler) updateReliability(s *session, first, second protocol.PathI
 	fcIdle := sch.fcBlockedAt.IsZero() || now.Sub(sch.fcBlockedAt) > FQ_FC_RELEASE
 	warm := sch.ackCount[first] >= FQ_MIN_ACKS && sch.ackCount[second] >= FQ_MIN_ACKS &&
 		now.Sub(sch.firstAckAt) >= FQ_WARMUP
+		// sửa 6: cửa sổ nhận cấp connection mà phía bên kia công bố (transport parameter lúc bắt tay)
+	rwnd := float64(s.connectionParameters.GetSendConnectionFlowControlWindow())
+	fill := func(o *path) float64 { // cwnd của path o so với cửa sổ nhận
+		if rwnd <= 0 {
+			return 0
+		}
+		return float64(o.sentPacketHandler.GetCongestionWindow()) / rwnd
+	}
 
 	check := func(me, other protocol.PathID, qMe, qOther float64) {
 		p, o := s.paths[me], s.paths[other]
 		// Gắn cờ: path này kém path kia rõ rệt (sửa 3) VÀ cửa sổ nhận đang là nút thắt (sửa 1)
 		// worse := warm && fcRecent && sch.rewardEMA[me] < sch.rewardEMA[other]-FQ_R_MARGIN_BAD
-		worse := warm && fcRecent && sch.penaltyEMA[me] > sch.penaltyEMA[other]+FQ_PEN_MARGIN_BAD
+		// worse := warm && fcRecent && sch.penaltyEMA[me] > sch.penaltyEMA[other]+FQ_PEN_MARGIN_BAD
+		// sửa 6: VÀ path còn lại một mình đủ lấp đầy cửa sổ nhận (cwnd ≥ FQ_FILL_ON × rwnd). Nếu không,
+		// path chậm vẫn cộng thêm băng thông dù làm cửa sổ bị chặn (S3 ở rwnd 1 MB: TRR 129 > 1 path 95).
+		fillOther := fill(o)
+		worse := warm && fcRecent && fillOther >= FQ_FILL_ON &&
+			sch.penaltyEMA[me] > sch.penaltyEMA[other]+FQ_PEN_MARGIN_BAD
+
 		// Gỡ cờ: phần phạt (lRTT + loss) về gần path kia, HOẶC kết nối đã lâu không bị chặn (sửa 1)
-		recovered := sch.penaltyEMA[me] <= sch.penaltyEMA[other]+FQ_PEN_MARGIN_OK || fcIdle
+		// recovered := sch.penaltyEMA[me] <= sch.penaltyEMA[other]+FQ_PEN_MARGIN_OK || fcIdle
+		// sửa 6: cũng gỡ khi path còn lại không còn đủ lấp đầy cửa sổ (cwnd < FQ_FILL_OFF × rwnd, hysteresis).
+		recovered := sch.penaltyEMA[me] <= sch.penaltyEMA[other]+FQ_PEN_MARGIN_OK || fcIdle || fillOther < FQ_FILL_OFF
 
 		if worse {
 			sch.badStreak[me]++
@@ -198,13 +214,24 @@ func (sch *scheduler) updateReliability(s *session, first, second protocol.PathI
 			!o.unreliable.Get() && !o.potentiallyFailed.Get() {
 			p.unreliable.Set(true)
 			sch.flagChanged[me], sch.forceAdjust, sch.badStreak[me] = now, true, 0
-			utils.Infof("FQSAT: path %d -> UNRELIABLE (rEMA=%.3f vs %.3f, pen=%.3f vs %.3f, Q=%.3f vs %.3f, fcBlocked %.0fms ago)",
+			// utils.Infof("FQSAT: path %d -> UNRELIABLE (rEMA=%.3f vs %.3f, pen=%.3f vs %.3f, Q=%.3f vs %.3f, fcBlocked %.0fms ago)",
+			// 	me, sch.rewardEMA[me], sch.rewardEMA[other], sch.penaltyEMA[me], sch.penaltyEMA[other],
+			// 	qMe, qOther, float64(now.Sub(sch.fcBlockedAt))/1e6)
+			utils.Infof("FQSAT: path %d -> UNRELIABLE (rEMA=%.3f vs %.3f, pen=%.3f vs %.3f, Q=%.3f vs %.3f, fcBlocked %.0fms ago, fill_other=%.2f)",
 				me, sch.rewardEMA[me], sch.rewardEMA[other], sch.penaltyEMA[me], sch.penaltyEMA[other],
-				qMe, qOther, float64(now.Sub(sch.fcBlockedAt))/1e6)
+				qMe, qOther, float64(now.Sub(sch.fcBlockedAt))/1e6, fillOther)
+
 		} else if p.unreliable.Get() && sch.goodStreak[me] >= FQ_GOOD_STREAK {
 			p.unreliable.Set(false)
 			sch.flagChanged[me], sch.forceAdjust, sch.goodStreak[me] = now, true, 0
+			// why := "penalty ok"
 			why := "penalty ok"
+			if fcIdle {
+				why = "rwnd not limiting"
+			} else if fillOther < FQ_FILL_OFF {
+				why = "other path cannot fill rwnd"
+			}
+
 			if fcIdle {
 				why = "rwnd not limiting"
 			}
@@ -228,7 +255,10 @@ func (sch *scheduler) probePaths(s *session) error {
 	var toProbe []*path
 	s.pathsLock.RLock()
 	for _, pth := range s.paths {
-		if pth.pathID == protocol.InitialPathID || pth.potentiallyFailed.Get() {
+		// if pth.pathID == protocol.InitialPathID || pth.potentiallyFailed.Get() {
+		// 	continue
+		// }
+		if pth.pathID == protocol.InitialPathID { // bỏ "|| pth.potentiallyFailed.Get()"
 			continue
 		}
 		if pth.rttStats.SmoothedRTT() == 0 { // chưa có mẫu RTT, để cơ chế duplicate của MPQUIC lo
@@ -249,8 +279,11 @@ func (sch *scheduler) probePaths(s *session) error {
 		// }
 
 		interval := FQ_QUIET_PROBE // path chưa gắn cờ: chỉ giữ một mẫu/giây khi nó im lặng
-		if pth.unreliable.Get() {
-			interval = FQ_PING_INTERVAL // path bị gắn cờ: thăm dò dày để học và gỡ cờ
+		// if pth.unreliable.Get() {
+		// 	interval = FQ_PING_INTERVAL // path bị gắn cờ: thăm dò dày để học và gỡ cờ
+		// }
+		if pth.unreliable.Get() || pth.potentiallyFailed.Get() { // thêm path pf
+			interval = FQ_PING_INTERVAL
 		}
 		if now.Sub(pth.lastAck) > interval && now.Sub(pth.lastProbe) > interval {
 			toProbe = append(toProbe, pth)
@@ -264,4 +297,58 @@ func (sch *scheduler) probePaths(s *session) error {
 		}
 	}
 	return nil
+}
+
+// logPathStats (chẩn đoán): một dòng "PSTAT" cho mỗi path dữ liệu, gọi mỗi INTERVAL trước
+// adjustAllocation (lúc stream.packetSent còn chứa số frame của khoảng vừa qua).
+//
+//	dfr   : số frame dữ liệu stream gửi trên path trong khoảng vừa qua (theo TRR)
+//	nstr  : số stream đang được gán vào path
+//	pkts/losses: tích luỹ từ đầu kết nối (script phân tích tự lấy hiệu)
+//	fcage : ms kể từ lần cuối kết nối bị cửa sổ nhận chặn (-1: chưa bao giờ)
+//
+// Các trường FQSAT (ack, pen, rew, unrel) chỉ có ý nghĩa khi FQ_ENABLE = true.
+func (sch *scheduler) logPathStats(s *session) {
+	now := time.Now()
+	fcage := int64(-1)
+	if !sch.fcBlockedAt.IsZero() {
+		fcage = int64(now.Sub(sch.fcBlockedAt) / time.Millisecond)
+	}
+	dfr := make(map[protocol.PathID]int)
+	nstr := make(map[protocol.PathID]int)
+	for _, streamID := range s.streamsMap.openStreams {
+		if streamID == 1 {
+			continue
+		}
+		st := s.streamsMap.streams[streamID]
+		if st == nil {
+			continue
+		}
+		for pid, n := range st.packetSent {
+			dfr[pid] += n
+		}
+		if st.path != nil {
+			nstr[st.path.pathID]++
+		}
+	}
+	for pid, pth := range s.paths {
+		if pid == protocol.InitialPathID {
+			continue
+		}
+		pkts, _, losses := pth.sentPacketHandler.GetStatistics()
+		// utils.Infof("PSTAT p=%d dfr=%d nstr=%d srtt=%.1f lrtt=%.1f cwnd=%d inf=%d pkts=%d losses=%d pf=%t unrel=%t ack=%d pen=%.3f rew=%.3f fcage=%d",
+		// 	pid, dfr[pid], nstr[pid],
+		// 	float64(pth.rttStats.SmoothedRTT())/1e6, float64(pth.rttStats.LatestRTT())/1e6,
+		// 	pth.sentPacketHandler.GetCongestionWindow(), pth.sentPacketHandler.GetBytesInFlight(),
+		// 	pkts, losses, pth.potentiallyFailed.Get(), pth.unreliable.Get(),
+		// 	sch.ackCount[pid], sch.penaltyEMA[pid], sch.rewardEMA[pid], fcage)
+		utils.Infof("PSTAT p=%d dfr=%d nstr=%d srtt=%.1f lrtt=%.1f cwnd=%d inf=%d pkts=%d losses=%d pf=%t unrel=%t ack=%d pen=%.3f rew=%.3f fcage=%d rwnd=%d",
+			pid, dfr[pid], nstr[pid],
+			float64(pth.rttStats.SmoothedRTT())/1e6, float64(pth.rttStats.LatestRTT())/1e6,
+			pth.sentPacketHandler.GetCongestionWindow(), pth.sentPacketHandler.GetBytesInFlight(),
+			pkts, losses, pth.potentiallyFailed.Get(), pth.unreliable.Get(),
+			sch.ackCount[pid], sch.penaltyEMA[pid], sch.rewardEMA[pid], fcage,
+			s.connectionParameters.GetSendConnectionFlowControlWindow())
+
+	}
 }

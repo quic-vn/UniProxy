@@ -962,6 +962,10 @@ type scheduler struct {
 const SCHE_ALGO = "TRR" // TRR, RR, or SAPS
 const INTERVAL = 1 * time.Second
 
+// FQ_PSTAT: mỗi INTERVAL in một dòng "PSTAT" cho từng path (chạy ở cả FQ_ENABLE=true/false).
+// Chỉ để chẩn đoán, không ảnh hưởng quyết định lập lịch.
+const FQ_PSTAT = true
+
 const (
 	FQ_ENABLE      = true
 	FQ_USE_FUZZY   = true // false => dùng FQ_DELTA_FIXED (biến thể Q-0.3 trong §4.3)
@@ -990,6 +994,9 @@ const (
 	//        kể từ ACK đầu tiên, mới được xét gắn cờ
 	FQ_MIN_ACKS = 500
 	FQ_WARMUP   = 3 * time.Second
+	// sửa 6: chỉ gắn cờ khi path còn lại một mình có cwnd ≥ FQ_FILL_ON × cửa sổ nhận; gỡ khi < FQ_FILL_OFF
+	FQ_FILL_ON  = 0.8
+	FQ_FILL_OFF = 0.6
 )
 
 var PORTION map[*path]float32
@@ -1731,8 +1738,12 @@ func (sch *scheduler) sendPacket(s *session) error {
 			}
 			select {
 			case <-sch.timer.C:
+				if FQ_PSTAT {
+					sch.logPathStats(s) // chẩn đoán: thống kê từng path trong khoảng INTERVAL vừa qua
+				}
 				sch.adjustAllocation(s)
 				sch.resetStatistics(s)
+
 			default:
 				if sch.forceAdjust {
 					sch.forceAdjust = false

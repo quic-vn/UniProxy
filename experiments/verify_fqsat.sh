@@ -15,6 +15,12 @@ cnt()  { grep -cF -- "$2" "$1" 2>/dev/null || true; }         # cnt FILE "chuoi"
 infunc() { # infunc FILE "func ten(" "chuoi": chuoi nam trong than ham do
   awk -v f="$2" -v s="$3" 'index($0,f)==1{on=1;next} on&&/^func /{on=0} on&&index($0,s){found=1} END{exit !found}' "$1"
 }
+infunc_code() { # nhu infunc nhung bo phan comment (//...) truoc khi so khop
+  awk -v f="$2" -v s="$3" 'index($0,f)==1{on=1;next} on&&/^func /{on=0} on{l=$0; sub(/\/\/.*/,"",l); if(index(l,s)) found=1} END{exit !found}' "$1"
+}
+showfunc() { # showfunc FILE "func ten(" "chuoi": in so dong + noi dung cac dong chua chuoi
+  awk -v f="$2" -v s="$3" 'index($0,f)==1{on=1;next} on&&/^func /{on=0} on&&index($0,s){printf "           %s:%d: %s\n", FILENAME, NR, $0}' "$1"
+}
 [[ -d "$MQ" && -d "$QT" ]] || { echo "Khong thay mp-quic/ va quic-tun/ trong $REPO"; exit 2; }
 echo "REPO = $REPO"
 
@@ -113,6 +119,66 @@ infunc "$M" "func (m *streamsMap) getStreamForPath(" "now.Sub(pth.congestionlimi
 
 echo "== 8. session.go: hook ACK"
 infunc "$MQ/session.go" "func (s *session) handleAckFrame(" "s.scheduler.learnFromAck(s, pth)" && ok "handleAckFrame goi learnFromAck" || bad "handleAckFrame chua goi learnFromAck"
+
+echo "== 8b. Bon sua doi (co co dieu kien, PING tham do, quyet dinh theo EMA, chot khoi dong)"
+for k in FQ_PEN_MARGIN_BAD FQ_PEN_MARGIN_OK FQ_FC_RECENT FQ_FC_RELEASE FQ_PING_INTERVAL FQ_QUIET_PROBE FQ_MIN_ACKS FQ_WARMUP FQ_FILL_ON FQ_FILL_OFF; do
+  v="$(grep -E "^[[:space:]]*$k[[:space:]]*=" "$C" | head -1 | sed -E 's/^[[:space:]]*[A-Z_]+[[:space:]]*=[[:space:]]*([^/]*).*/\1/; s/[[:space:]]+$//')"
+  [[ -n "$v" ]] && echo "         $k = $v" || bad "thieu hang $k"
+done
+grep -qE "fcBlockedAt[[:space:]]+time.Time" "$C" && ok "struct: fcBlockedAt" || bad "struct scheduler thieu fcBlockedAt time.Time"
+grep -qE "ackCount[[:space:]]+map\[protocol.PathID\]uint64" "$C" && ok "struct: ackCount" || bad "struct scheduler thieu ackCount"
+grep -qE "firstAckAt[[:space:]]+time.Time" "$C" && ok "struct: firstAckAt" || bad "struct scheduler thieu firstAckAt"
+infunc "$C" "func (sch *scheduler) setup(" "sch.ackCount = make" && ok "setup() khoi tao ackCount" || bad "setup() chua khoi tao ackCount (se panic)"
+infunc "$C" "func (sch *scheduler) sendPacket(" "sch.probePaths(s)" && ok "sendPacket goi probePaths (sua 2)" || bad "sendPacket chua goi probePaths"
+# sua 1: stream_framer ghi fcBlockedAt
+SF="$MQ/stream_framer.go"
+has "$SF" "func (f *streamFramer) noteFCBlocked()" && ok "stream_framer: ham noteFCBlocked" || bad "stream_framer.go thieu noteFCBlocked"
+infunc "$SF" "func (f *streamFramer) noteFCBlocked(" "scheduler.fcBlockedAt = time.Now()" && ok "noteFCBlocked ghi fcBlockedAt" || bad "noteFCBlocked khong ghi fcBlockedAt"
+NFC="$(awk 'index($0,"func (f *streamFramer) maybePopNormalFrames(")==1{on=1;next} on&&/^func /{on=0} on&&index($0,"f.noteFCBlocked()"){c++} END{print c+0}' "$SF")"
+[[ "$NFC" -ge 2 ]] && ok "maybePopNormalFrames goi noteFCBlocked o $NFC cho" || bad "maybePopNormalFrames phai goi noteFCBlocked o 2 cho (dang: $NFC)"
+# sua 2: path.go + session.go + probePaths
+grep -qE "lastProbe[[:space:]]+time.Time" "$MQ/path.go" && ok "path.go: lastProbe" || bad "path.go thieu lastProbe"
+grep -qE "lastAck[[:space:]]+time.Time" "$MQ/path.go" && ok "path.go: lastAck" || bad "path.go thieu lastAck"
+infunc "$MQ/session.go" "func (s *session) handleAckFrame(" "pth.lastAck = time.Now()" && ok "handleAckFrame ghi lastAck" || bad "handleAckFrame chua ghi pth.lastAck"
+HA="func (s *session) handleAckFrame("
+infunc_code "$MQ/session.go" "$HA" "sRTTBefore, lRTTBefore := pth.rttStats.SmoothedRTT(), pth.rttStats.LatestRTT()" \
+  && infunc_code "$MQ/session.go" "$HA" "lossAfter != lossBefore" && infunc_code "$MQ/session.go" "$HA" "&& newInfo &&" \
+  && ok "handleAckFrame chi hoc khi co mau RTT moi hoac loss moi (sua 5 ban 2)" \
+  || bad "handleAckFrame phai xac dinh newInfo bang mau RTT moi / loss moi (sua 5 ban 2)"
+if infunc_code "$MQ/session.go" "$HA" "GetLeastUnacked() != luBefore"; then
+  bad "handleAckFrame van dung GetLeastUnacked() lam newInfo (ACK cua goi chi-co-ACK lam no thay doi):"; showfunc "$MQ/session.go" "$HA" "luBefore"
+else ok "handleAckFrame khong dung GetLeastUnacked() lam newInfo"; fi
+has "$S" "func (sch *scheduler) probePaths(" && ok "probePaths ton tai" || bad "thieu func probePaths"
+infunc "$S" "func (sch *scheduler) probePaths(" "s.sendProbePing(pth)" && ok "probePaths gui PING thuan (sendProbePing)" || bad "probePaths phai goi s.sendProbePing (KHONG dung sendPing: PackPing xoa ACK dang cho)"
+if infunc_code "$S" "func (sch *scheduler) probePaths(" "s.sendPing("; then
+  bad "probePaths van goi s.sendPing (PackPing xoa ACK dang cho -> ket noi treo):"; showfunc "$S" "func (sch *scheduler) probePaths(" "sendPing("
+else ok "probePaths khong dung sendPing"; fi
+infunc "$S" "func (sch *scheduler) probePaths(" "FQ_PING_INTERVAL" && infunc "$S" "func (sch *scheduler) probePaths(" "FQ_QUIET_PROBE" \
+  && ok "probePaths: path gan co moi FQ_PING_INTERVAL, path im lang moi FQ_QUIET_PROBE" || bad "probePaths chua phan biet FQ_PING_INTERVAL / FQ_QUIET_PROBE"
+if infunc_code "$S" "func (sch *scheduler) probePaths(" "InitialPathID || pth.potentiallyFailed.Get()"; then
+  bad "probePaths van bo qua path potentiallyFailed (path pf khong bao gio duoc danh thuc):"; showfunc "$S" "func (sch *scheduler) probePaths(" "potentiallyFailed"
+else ok "probePaths khong bo qua path potentiallyFailed"; fi
+infunc_code "$S" "func (sch *scheduler) probePaths(" "pth.unreliable.Get() || pth.potentiallyFailed.Get()" \
+  && ok "probePaths: path pf duoc PING moi FQ_PING_INTERVAL" || bad "probePaths: path pf phai dung FQ_PING_INTERVAL (pth.unreliable.Get() || pth.potentiallyFailed.Get())"
+has "$MQ/packet_packer.go" "func (p *packetPacker) PackPurePing(" && ok "packet_packer: PackPurePing" || bad "packet_packer.go thieu PackPurePing"
+infunc "$MQ/packet_packer.go" "func (p *packetPacker) PackPurePing(" "frames = append(frames, p.ackFrame[pth.pathID])" && ok "PackPurePing giu ACK dang cho" || bad "PackPurePing phai kem p.ackFrame dang cho"
+infunc "$MQ/session.go" "func (s *session) sendProbePing(" "PackPurePing(pth)" && ok "session: sendProbePing dung PackPurePing" || bad "session.go thieu sendProbePing/PackPurePing"
+infunc "$MQ/session.go" "func (s *session) sendProbePing(" "pth.open.Get()" && ok "sendProbePing bo qua path da dong" || bad "sendProbePing phai kiem tra pth.open.Get()"
+infunc "$C" "func (sch *scheduler) getRetransmission(" "case *wire.PingFrame:" && ok "getRetransmission khong truyen lai PING" || bad "getRetransmission thieu 'case *wire.PingFrame:' (PING mat se vao controlFrames chung)"
+# sua 1 + 3 + 4 trong updateReliability
+UR="func (sch *scheduler) updateReliability("
+infunc "$S" "$UR" "fcRecent" && infunc "$S" "$UR" "FQ_FC_RECENT" && ok "updateReliability: gan co can fcRecent (sua 1)" || bad "updateReliability chua xet fcRecent/FQ_FC_RECENT"
+infunc "$S" "$UR" "fcIdle" && infunc "$S" "$UR" "FQ_FC_RELEASE" && ok "updateReliability: go co khi fcIdle (sua 1)" || bad "updateReliability chua xet fcIdle/FQ_FC_RELEASE"
+infunc "$S" "$UR" "sch.penaltyEMA[me] > sch.penaltyEMA[other]+FQ_PEN_MARGIN_BAD" && ok "updateReliability: gan co theo penaltyEMA (sua 3)" || bad "updateReliability phai gan co theo penaltyEMA voi FQ_PEN_MARGIN_BAD (rewardEMA gay flapping)"
+if infunc_code "$S" "$UR" "rewardEMA[me] < sch.rewardEMA[other]"; then
+  bad "updateReliability van gan co theo rewardEMA (gay bat/tat co lien tuc):"; showfunc "$S" "$UR" "rewardEMA[me] <"
+else ok "updateReliability khong con gan co theo rewardEMA"; fi
+infunc_code "$S" "$UR" "s.connectionParameters.GetSendConnectionFlowControlWindow()" && infunc_code "$S" "$UR" "fillOther >= FQ_FILL_ON" \
+  && infunc_code "$S" "$UR" "fillOther < FQ_FILL_OFF" && ok "updateReliability: chi gan co khi path con lai lap day rwnd (sua 6)" \
+  || bad "updateReliability chua xet fillOther/FQ_FILL_ON/FQ_FILL_OFF theo GetSendConnectionFlowControlWindow (sua 6)"
+infunc "$S" "$UR" "FQ_MIN_ACKS" && infunc "$S" "$UR" "FQ_WARMUP" && ok "updateReliability: chot khoi dong (sua 4)" || bad "updateReliability chua xet FQ_MIN_ACKS/FQ_WARMUP"
+infunc "$S" "func (sch *scheduler) learnFromAck(" "sch.ackCount[pid]++" && ok "learnFromAck dem ackCount" || bad "learnFromAck chua tang ackCount"
+infunc "$S" "func (sch *scheduler) learnFromAck(" "sch.firstAckAt = time.Now()" && ok "learnFromAck ghi firstAckAt" || bad "learnFromAck chua ghi firstAckAt"
 
 echo "== 9. Code la ngoai thiet ke"
 [[ -f "$MQ/path_chooser.go" ]] && bad "co mp-quic/path_chooser.go (khong thuoc ban ghep; import internal/qsat)" || ok "khong co path_chooser.go"

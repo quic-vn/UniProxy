@@ -640,17 +640,57 @@ func (s *session) handleRstStreamFrame(frame *wire.RstStreamFrame) error {
 	return s.flowControlManager.ResetStream(frame.StreamID, frame.ByteOffset)
 }
 
+// func (s *session) handleAckFrame(frame *wire.AckFrame) error {
+// 	// pth := s.paths[frame.PathID]
+// 	// err := pth.sentPacketHandler.ReceivedAck(frame, pth.lastRcvdPacketNumber, pth.lastNetworkActivityTime)
+// 	// if err == nil && pth.rttStats.SmoothedRTT() > s.rttStats.SmoothedRTT() {
+// 	// 	// Update the session RTT, which comes to take the max RTT on all paths
+// 	// 	s.rttStats.UpdateSessionRTT(pth.rttStats.SmoothedRTT())
+// 	// }
+// 	// // if err == nil && FQ_ENABLE && SCHE_ALGO == "TRR" && pth.pathID != protocol.InitialPathID {
+// 	// // 	s.scheduler.learnFromAck(s, pth)
+// 	// // }
+// 	// if err == nil && FQ_ENABLE && SCHE_ALGO == "TRR" && pth.pathID != protocol.InitialPathID {
+// 	// 	pth.lastAck = time.Now() // FQSAT sửa 2: path vừa có ACK thì chưa cần PING thăm dò
+// 	// 	s.scheduler.learnFromAck(s, pth)
+// 	// }
+// 	// return err
+// 	pth := s.paths[frame.PathID]
+// 	luBefore := pth.sentPacketHandler.GetLeastUnacked() // FQSAT sửa 5
+// 	err := pth.sentPacketHandler.ReceivedAck(frame, pth.lastRcvdPacketNumber, pth.lastNetworkActivityTime)
+// 	if err == nil && pth.rttStats.SmoothedRTT() > s.rttStats.SmoothedRTT() {
+// 		// Update the session RTT, which comes to take the max RTT on all paths
+// 		s.rttStats.UpdateSessionRTT(pth.rttStats.SmoothedRTT())
+// 	}
+// 	// FQSAT sửa 5: chỉ học từ ACK có thông tin mới (xác nhận thêm packet). ACK lặp lại cũng trả về
+// 	// err == nil; nếu học từ chúng thì LatestRTT cũ của một path không còn được dùng bị đưa vào
+// 	// penaltyEMA mãi mãi, và lastAck luôn mới nên PING thăm dò path đó không bao giờ được gửi.
+// 	newInfo := pth.sentPacketHandler.GetLeastUnacked() != luBefore
+// 	if err == nil && newInfo && FQ_ENABLE && SCHE_ALGO == "TRR" && pth.pathID != protocol.InitialPathID {
+// 		pth.lastAck = time.Now() // FQSAT sửa 2: path vừa có ACK thì chưa cần PING thăm dò
+// 		s.scheduler.learnFromAck(s, pth)
+// 	}
+// 	return err
+// }
+
 func (s *session) handleAckFrame(frame *wire.AckFrame) error {
 	pth := s.paths[frame.PathID]
+	// FQSAT sửa 5 (bản 2): ghi lại mẫu RTT và số packet mất trước khi xử lý ACK
+	sRTTBefore, lRTTBefore := pth.rttStats.SmoothedRTT(), pth.rttStats.LatestRTT()
+	_, _, lossBefore := pth.sentPacketHandler.GetStatistics()
 	err := pth.sentPacketHandler.ReceivedAck(frame, pth.lastRcvdPacketNumber, pth.lastNetworkActivityTime)
 	if err == nil && pth.rttStats.SmoothedRTT() > s.rttStats.SmoothedRTT() {
 		// Update the session RTT, which comes to take the max RTT on all paths
 		s.rttStats.UpdateSessionRTT(pth.rttStats.SmoothedRTT())
 	}
-	// if err == nil && FQ_ENABLE && SCHE_ALGO == "TRR" && pth.pathID != protocol.InitialPathID {
-	// 	s.scheduler.learnFromAck(s, pth)
-	// }
-	if err == nil && FQ_ENABLE && SCHE_ALGO == "TRR" && pth.pathID != protocol.InitialPathID {
+	// FQSAT sửa 5 (bản 2): chỉ học từ ACK có thông tin mới = tạo mẫu RTT mới HOẶC phát hiện thêm
+	// packet mất. Không dùng GetLeastUnacked(): ACK cho các gói chỉ-có-ACK (không vào lịch sử) cũng
+	// làm LargestAcked/LeastUnacked tăng, nên path bị gắn cờ (chỉ còn gói ACK) trông như "có ACK mới"
+	// => lastAck luôn mới, PING thăm dò không bao giờ gửi, penaltyEMA đông cứng với RTT cũ.
+	_, _, lossAfter := pth.sentPacketHandler.GetStatistics()
+	newInfo := pth.rttStats.SmoothedRTT() != sRTTBefore || pth.rttStats.LatestRTT() != lRTTBefore ||
+		lossAfter != lossBefore
+	if err == nil && newInfo && FQ_ENABLE && SCHE_ALGO == "TRR" && pth.pathID != protocol.InitialPathID {
 		pth.lastAck = time.Now() // FQSAT sửa 2: path vừa có ACK thì chưa cần PING thăm dò
 		s.scheduler.learnFromAck(s, pth)
 	}
