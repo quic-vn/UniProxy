@@ -428,11 +428,17 @@ set_algorithm() {
 import re, sys
 path, algo = sys.argv[1], sys.argv[2]
 s = open(path, encoding="utf-8").read()
+# FQSAT: thuat toan "TRR_FQ" = SCHE_ALGO "TRR" + FQ_ENABLE true; moi thuat toan khac => FQ_ENABLE false
+sche, fq = (("TRR", "true") if algo == "TRR_FQ" else (algo, "false"))
 pat = r'(?m)^(\s*const\s+SCHE_ALGO(?:\s+\w+)?\s*=\s*)"[^"]+"(.*)$'
-s2, n = re.subn(pat, lambda m: f'{m.group(1)}"{algo}"{m.group(2)}', s, count=1)
+s2, n = re.subn(pat, lambda m: f'{m.group(1)}"{sche}"{m.group(2)}', s, count=1)
 if n != 1:
     raise SystemExit(f"Could not uniquely patch SCHE_ALGO in {path}; matches={n}")
-open(path, "w", encoding="utf-8").write(s2)
+pat_fq = r'(?m)^(\s*FQ_ENABLE\s*=\s*)(true|false)(.*)$'
+s3, nfq = re.subn(pat_fq, lambda m: f'{m.group(1)}{fq}{m.group(3)}', s2, count=1)
+if algo == "TRR_FQ" and nfq != 1:
+    raise SystemExit(f"TRR_FQ requested but FQ_ENABLE not found in {path}")
+open(path, "w", encoding="utf-8").write(s3 if nfq == 1 else s2)
 PY
 }
 

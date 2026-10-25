@@ -210,6 +210,9 @@ func (f *streamFramer) maybePopNormalFrames(maxBytes protocol.ByteCount, pth *pa
 
 		frame.Data = data
 		f.flowControlManager.AddBytesSent(s.streamID, protocol.ByteCount(len(data)))
+		if FQ_ENABLE {
+			f.noteDataSent() // FQSAT mục 5: phía này đang gửi dữ liệu stream
+		}
 		// s.byteSent[pth.pathID] += protocol.ByteCount(len(data))
 		// if !s.startStat && time.Since(s.openTime) >= 10*time.Second {
 		// 	s.byteSent = make(map[protocol.PathID]protocol.ByteCount)
@@ -266,6 +269,14 @@ func (f *streamFramer) maybePopNormalFrames(maxBytes protocol.ByteCount, pth *pa
 func (f *streamFramer) noteFCBlocked() {
 	if f.streamsMap != nil && f.streamsMap.session != nil && f.streamsMap.session.scheduler != nil {
 		f.streamsMap.session.scheduler.fcBlockedAt = time.Now()
+	}
+}
+
+// noteDataSent (FQSAT mục 5): ghi lại thời điểm phía này gửi một frame dữ liệu stream.
+// probePaths chỉ thăm dò path im lặng khi việc này xảy ra gần đây.
+func (f *streamFramer) noteDataSent() {
+	if f.streamsMap != nil && f.streamsMap.session != nil && f.streamsMap.session.scheduler != nil {
+		f.streamsMap.session.scheduler.lastDataSentAt = time.Now()
 	}
 }
 

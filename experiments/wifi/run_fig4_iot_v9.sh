@@ -539,32 +539,18 @@ set_algorithm() {
   python3 - "$SCHED" "$algo" <<'PY'
 import re, sys
 path, algo = sys.argv[1], sys.argv[2]
-# tên nhánh -> (SCHE_ALGO, PATH_ALGO, QRANK_ALLOC, QRANK_ADJUST, QRANK_GSFP)
-ALGOS = {
-    "TRR": ("TRR", "MINRTT", False, False, False),
-    "RR": ("RR", "MINRTT", False, False, False),
-    "SAPS": ("SAPS", "MINRTT", False, False, False),
-    "TRR_QSAT": ("TRR", "QSAT", False, False, False),
-    "TRR_QSATSH": ("TRR", "QSAT_SHADOW", False, False, False),
-    "TRR_EPSRND": ("TRR", "EPS_RANDOM", False, False, False),
-    "TRR_QRANK": ("TRR", "QSAT_SHADOW", True, True, True),
-    "TRR_QSAT_QRANK": ("TRR", "QSAT", True, True, True),
-}
-if algo not in ALGOS:
-    raise SystemExit(f"Unknown algorithm {algo}; known: {' '.join(ALGOS)}")
-sche, palgo, a, j, g = ALGOS[algo]
 s = open(path, encoding="utf-8").read()
-for name, value in (("SCHE_ALGO", sche), ("PATH_ALGO", palgo)):
-    pat = rf'(?m)^(\s*const\s+{name}(?:\s+\w+)?\s*=\s*)"[^"]+"(.*)$'
-    s, n = re.subn(pat, lambda m: f'{m.group(1)}"{value}"{m.group(2)}', s, count=1)
-    if n != 1:
-        raise SystemExit(f"Could not uniquely patch {name} in {path}; matches={n}")
-for name, value in (("QRANK_ALLOC", a), ("QRANK_ADJUST", j), ("QRANK_GSFP", g)):
-    pat = rf'(?m)^(\s*const\s+{name}\s*=\s*)(true|false)(.*)$'
-    s, n = re.subn(pat, lambda m: f'{m.group(1)}{"true" if value else "false"}{m.group(3)}', s, count=1)
-    if n != 1:
-        raise SystemExit(f"Could not uniquely patch {name} in {path}; matches={n}")
-open(path, "w", encoding="utf-8").write(s)
+# FQSAT: thuat toan "TRR_FQ" = SCHE_ALGO "TRR" + FQ_ENABLE true; moi thuat toan khac => FQ_ENABLE false
+sche, fq = (("TRR", "true") if algo == "TRR_FQ" else (algo, "false"))
+pat = r'(?m)^(\s*const\s+SCHE_ALGO(?:\s+\w+)?\s*=\s*)"[^"]+"(.*)$'
+s2, n = re.subn(pat, lambda m: f'{m.group(1)}"{sche}"{m.group(2)}', s, count=1)
+if n != 1:
+    raise SystemExit(f"Could not uniquely patch SCHE_ALGO in {path}; matches={n}")
+pat_fq = r'(?m)^(\s*FQ_ENABLE\s*=\s*)(true|false)(.*)$'
+s3, nfq = re.subn(pat_fq, lambda m: f'{m.group(1)}{fq}{m.group(3)}', s2, count=1)
+if algo == "TRR_FQ" and nfq != 1:
+    raise SystemExit(f"TRR_FQ requested but FQ_ENABLE not found in {path}")
+open(path, "w", encoding="utf-8").write(s3 if nfq == 1 else s2)
 PY
 }
 
@@ -826,7 +812,7 @@ r1 bash -lc 'iw dev ${IOT_IF} info > "$adir/iw_${IOT_IF}_info.txt" 2>&1; grep -q
 
 # ----- Application + QUIC servers -----
 h2 bash -lc 'cd "$REPO"; python3 example/server.py > "$adir/h2_server.log" 2>&1 & echo \$! > "$adir/h2_server.pid"'
-r5 bash -lc 'cd "$REPO"; QSAT_LOG_DIR="$adir" ./quic-tun/server/cmd/cmd --listen-on 10.0.6.2:7500 > "$adir/r5_server.log" 2>&1 & echo \$! > "$adir/r5_server.pid"'
+r5 bash -lc 'cd "$REPO"; ./quic-tun/server/cmd/cmd --listen-on 10.0.6.2:7500 > "$adir/r5_server.log" 2>&1 & echo \$! > "$adir/r5_server.pid"'
 sh sleep ${AFTER_SERVER_START_SLEEP}
 
 h2 bash -lc 'for i in \$(seq 1 ${READY_RETRIES}); do pid=\$(cat "$adir/h2_server.pid" 2>/dev/null || true); if [ -n "\$pid" ] && kill -0 "\$pid" 2>/dev/null && ss -lnt | grep -q ":5000"; then touch "$adir/h2_ready.ok"; break; fi; sleep ${READY_INTERVAL}; done'
@@ -839,7 +825,7 @@ sh sleep ${AFTER_TPROXY_SLEEP}
 r1 bash -lc 'ip rule show > "$adir/ip_rule.txt"; ip route show table 100 > "$adir/route_table100.txt"; iptables -t mangle -S PREROUTING > "$adir/iptables_prerouting.txt"; ip rule show | grep -q "fwmark 0x1" && ip route show table 100 | grep -q "local" && iptables -t mangle -C PREROUTING --in-interface ${IOT_IF} -p tcp -d 10.0.7.0/24 -j TPROXY --on-port 6500 --on-ip 127.0.0.1 --tproxy-mark 1/1 && [ "\$(sysctl -n net.ipv4.conf.all.src_valid_mark)" = 0 ] && touch "$adir/tproxy_ready.ok"'
 
 # ----- Proxy client (client_iot.sh exec's the binary, so the pid is the client's) -----
-r1 bash -lc 'cd "$REPO"; IOT_IF=${IOT_IF} QSAT_LOG_DIR="$adir" bash client_iot.sh > "$adir/r1_client.log" 2>&1 & echo \$! > "$adir/r1_client.pid"'
+r1 bash -lc 'cd "$REPO"; IOT_IF=${IOT_IF} bash client_iot.sh > "$adir/r1_client.log" 2>&1 & echo \$! > "$adir/r1_client.pid"'
 sh sleep ${AFTER_R1_START_SLEEP}
 
 r1 bash -lc 'for i in \$(seq 1 ${READY_RETRIES}); do pid=\$(cat "$adir/r1_client.pid" 2>/dev/null || true); if [ -n "\$pid" ] && kill -0 "\$pid" 2>/dev/null && ss -lnt | grep -q "127.0.0.1:6500" && ! grep -q "fatal error:" "$adir/r1_client.log"; then touch "$adir/r1_ready.ok"; break; fi; sleep ${READY_INTERVAL}; done'
@@ -962,7 +948,7 @@ PY
            "$adir"/iot_ap_method.txt "$adir"/assoc_method.txt "$adir"/ap_ports.txt "$adir"/client_iot_setup.log "$adir"/suspend_check.txt \
            "$adir"/workload_start.txt "$adir"/workload_end.txt "$adir"/mob_started.txt "$adir"/mob_loop_started.txt "$adir"/mob_error.txt \
            "$adir"/wmediumd_config.cfg "$adir"/wmediumd.log "$adir"/netem_params.txt \
-           "$adir"/h1_client.log "$adir"/fct.csv "$adir"/rate_1s.csv "$adir"/load_start.txt "$adir"/qsat_*.csv \
+           "$adir"/h1_client.log "$adir"/fct.csv "$adir"/rate_1s.csv "$adir"/load_start.txt \
            "$adir"/outage.txt "$adir"/outage_ctl.log "$adir"/outage_iptables_post.txt; do
     if [[ -f "$f" ]]; then cp -f "$f" "$bdir/"; fi
   done

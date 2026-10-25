@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Chay lan luot (theo khoi) cac kich ban x {TRR goc, TRR+FQSAT} x N lan.
 #   bash experiments/run_scenarios.sh [N] [ten_kich_ban ...]
-# Mac dinh: N=3, kich ban "S1a S1b S2". Danh sach lan chay ghi vao /tmp/fqsat_runs_<stamp>.txt
+# Mac dinh: N=3, kich ban "S1a S1b S2". Bang kich ban: experiments/scenarios.sh. FQSAT bat o CA HAI phia
+# (de chi bat o phia gui / quet rwnd: run_sweep.sh). Danh sach lan chay ghi vao /tmp/fqsat_runs_<stamp>.txt
 # (cuoi cung chep sang results/fqsat_manual/ neu ghi duoc)
 # (dinh dang: <kich_ban> <FQ_ENABLE> <thu_muc>), roi in tong hop bang summarize_runs.py.
 set -u
@@ -9,21 +10,8 @@ cd "$(dirname "$0")/.."
 N="${1:-3}"; shift || true
 SCEN=("$@"); [[ ${#SCEN[@]} -gt 0 ]] || SCEN=(S1a S1b S2)
 
-declare -A ARGS=(
-  # Kich ban 1: path 1 (RTT thap) bi loss, khong them delay; path 2 sach nhung RTT goc cao hon.
-  #   Do FCT short flow + 2 ket noi bulk nen. Suy giam giu suot lan chay.
-  [S1a]="--workload fct --impair-path 1 --base-delay2 20ms --delay 5ms --jitter 0ms --loss 2% --bg-conns 2"
-  #   Bien the: chenh RTT nho hon (10 vs 16 ms), loss lon hon -> de FQSAT gan co hon.
-  [S1b]="--workload fct --impair-path 1 --base-delay2 8ms --delay 5ms --jitter 0ms --loss 5% --bg-conns 2"
-  # Kich ban 2: path 2 chi co jitter (delay variability), khong loss; bulk, suy giam giay 20-60.
-  [S2]="--workload long --impair-path 2 --delay 20ms --jitter 30ms --loss 0%"
-  # Kich ban 3: path 2 chi tang delay (RTT 10 -> 90 ms), khong jitter, khong loss; giay 20-60.
-  #   rwnd du -> FQSAT du kien KEM hon (bo bang thong path 2); rwnd chat -> du kien TOT hon.
-  [S3]="--workload long --impair-path 2 --delay 45ms --jitter 0ms --loss 0%"
-  # Kich ban 4: = kich ban da chay (delay 45 ms, jitter 20 ms, loss 2%) de doi chung.
-  [S4]="--workload long --impair-path 2 --delay 45ms --jitter 20ms --loss 2%"
-)
-for s in "${SCEN[@]}"; do [[ -n "${ARGS[$s]:-}" ]] || { echo "Khong co kich ban $s (co: ${!ARGS[*]})"; exit 2; }; done
+source experiments/scenarios.sh
+scen_check "${SCEN[@]}" || exit 2
 
 # sudo khong hoi mat khau giua chung (output bi chuyen huong nen se treo neu hoi): dung "sudo -n".
 # May thi nghiem cho phep mn/python3 qua sudo khong mat khau; neu khong, chay "sudo true" truoc.

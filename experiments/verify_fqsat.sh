@@ -169,16 +169,43 @@ infunc "$C" "func (sch *scheduler) getRetransmission(" "case *wire.PingFrame:" &
 UR="func (sch *scheduler) updateReliability("
 infunc "$S" "$UR" "fcRecent" && infunc "$S" "$UR" "FQ_FC_RECENT" && ok "updateReliability: gan co can fcRecent (sua 1)" || bad "updateReliability chua xet fcRecent/FQ_FC_RECENT"
 infunc "$S" "$UR" "fcIdle" && infunc "$S" "$UR" "FQ_FC_RELEASE" && ok "updateReliability: go co khi fcIdle (sua 1)" || bad "updateReliability chua xet fcIdle/FQ_FC_RELEASE"
-infunc "$S" "$UR" "sch.penaltyEMA[me] > sch.penaltyEMA[other]+FQ_PEN_MARGIN_BAD" && ok "updateReliability: gan co theo penaltyEMA (sua 3)" || bad "updateReliability phai gan co theo penaltyEMA voi FQ_PEN_MARGIN_BAD (rewardEMA gay flapping)"
+infunc "$S" "$UR" "sch.penaltyEMA[me] > bestPen+FQ_PEN_MARGIN_BAD" && ok "updateReliability: gan co theo penaltyEMA so voi path tot nhat (sua 3)" || bad "updateReliability phai gan co theo penaltyEMA[me] > bestPen+FQ_PEN_MARGIN_BAD (rewardEMA gay flapping)"
 if infunc_code "$S" "$UR" "rewardEMA[me] < sch.rewardEMA[other]"; then
   bad "updateReliability van gan co theo rewardEMA (gay bat/tat co lien tuc):"; showfunc "$S" "$UR" "rewardEMA[me] <"
 else ok "updateReliability khong con gan co theo rewardEMA"; fi
-infunc_code "$S" "$UR" "s.connectionParameters.GetSendConnectionFlowControlWindow()" && infunc_code "$S" "$UR" "fillOther >= FQ_FILL_ON" \
-  && infunc_code "$S" "$UR" "fillOther < FQ_FILL_OFF" && ok "updateReliability: chi gan co khi path con lai lap day rwnd (sua 6)" \
-  || bad "updateReliability chua xet fillOther/FQ_FILL_ON/FQ_FILL_OFF theo GetSendConnectionFlowControlWindow (sua 6)"
+infunc_code "$S" "$UR" "rwnd := sch.rwndEstimate(s, ps)" && infunc_code "$S" "$UR" "fillOthers >= FQ_FILL_ON" \
+  && infunc_code "$S" "$UR" "fillOthers < FQ_FILL_OFF" && ok "updateReliability: chi gan co khi cac path con lai lap day rwnd (sua 6, N path)" \
+  || bad "updateReliability chua xet fillOthers/FQ_FILL_ON/FQ_FILL_OFF theo rwndEstimate (sua 6)"
 infunc "$S" "$UR" "FQ_MIN_ACKS" && infunc "$S" "$UR" "FQ_WARMUP" && ok "updateReliability: chot khoi dong (sua 4)" || bad "updateReliability chua xet FQ_MIN_ACKS/FQ_WARMUP"
 infunc "$S" "func (sch *scheduler) learnFromAck(" "sch.ackCount[pid]++" && ok "learnFromAck dem ackCount" || bad "learnFromAck chua tang ackCount"
 infunc "$S" "func (sch *scheduler) learnFromAck(" "sch.firstAckAt = time.Now()" && ok "learnFromAck ghi firstAckAt" || bad "learnFromAck chua ghi firstAckAt"
+
+echo "== 8c. Cac muc cai thien (3: mau RTT/sRTT sau go co, 5: tac dung phu client, 6: xep hang stream moi, 7: uoc luong rwnd, N path)"
+for k in FQ_POST_CLEAR FQ_SENDER_IDLE FQ_RANK_NEW_STREAMS FQ_RANK_LOSS_MS FQ_RWND_EST FQ_RWND_HDR FQ_RWND_DECAY; do
+  v="$(grep -E "^[[:space:]]*$k[[:space:]]*=" "$C" | head -1 | sed -E 's/^[[:space:]]*[A-Z_]+[[:space:]]*=[[:space:]]*([^/]*).*/\1/; s/[[:space:]]+$//')"
+  [[ -n "$v" ]] && echo "         $k = $v" || bad "thieu hang $k"
+done
+SPH="$MQ/ackhandler/sent_packet_handler.go"
+grep -qE "^var RTTSampleFromNewestAcked = false" "$SPH" && ok "ackhandler: RTTSampleFromNewestAcked (mac dinh false = goc)" || bad "sent_packet_handler.go thieu 'var RTTSampleFromNewestAcked = false'"
+infunc_code "$SPH" "func (h *sentPacketHandler) ReceivedAck(" "!rttUpdated && RTTSampleFromNewestAcked && len(ackedPackets) > 0" && ok "ReceivedAck lay mau RTT tu goi moi nhat con trong lich su (muc 3)" || bad "ReceivedAck chua co nhanh RTTSampleFromNewestAcked (muc 3)"
+infunc_code "$C" "func (sch *scheduler) setup(" "ackhandler.RTTSampleFromNewestAcked = FQ_ENABLE" && ok "setup() bat RTTSampleFromNewestAcked theo FQ_ENABLE" || bad "setup() chua gan ackhandler.RTTSampleFromNewestAcked = FQ_ENABLE"
+grep -qE "lossEMA[[:space:]]+map\[protocol.PathID\]float64" "$C" && ok "struct: lossEMA" || bad "struct scheduler thieu lossEMA"
+grep -qE "lastDataSentAt[[:space:]]+time.Time" "$C" && ok "struct: lastDataSentAt" || bad "struct scheduler thieu lastDataSentAt"
+grep -qE "rwndEst[[:space:]]+float64" "$C" && ok "struct: rwndEst" || bad "struct scheduler thieu rwndEst"
+infunc_code "$C" "func (sch *scheduler) setup(" "sch.lossEMA = make" && ok "setup() khoi tao lossEMA" || bad "setup() chua khoi tao lossEMA"
+has "$SF" "func (f *streamFramer) noteDataSent()" && infunc_code "$SF" "func (f *streamFramer) maybePopNormalFrames(" "f.noteDataSent()" && ok "stream_framer ghi lastDataSentAt (muc 5)" || bad "stream_framer.go thieu noteDataSent / chua goi trong maybePopNormalFrames"
+has "$C" "func (sch *scheduler) pathRank(" && infunc_code "$C" "func (sch *scheduler) pathRank(" "FQ_RANK_LOSS_MS * sch.lossEMA[p.pathID]" && ok "pathRank = sRTT + FQ_RANK_LOSS_MS x lossEMA (muc 6)" || bad "thieu pathRank voi FQ_RANK_LOSS_MS (muc 6)"
+infunc_code "$C" "func (sch *scheduler) streamAllocation(" "sch.pathRank(pth)" && ok "streamAllocation dung pathRank" || bad "streamAllocation chua dung pathRank"
+has "$S" "func dataPaths(s *session) []*path" && ok "dataPaths (N path)" || bad "thieu func dataPaths"
+has "$S" "func (sch *scheduler) rwndEstimate(" && infunc_code "$S" "func (sch *scheduler) rwndEstimate(" "RemainingConnectionWindowSize()+inflight" && ok "rwndEstimate = max(remaining + inflight) (muc 7)" || bad "thieu rwndEstimate (muc 7)"
+grep -qE "rwndEstAt[[:space:]]+time.Time" "$C" && ok "struct: rwndEstAt" || bad "struct scheduler thieu rwndEstAt (sua rwnd)"
+infunc_code "$S" "func (sch *scheduler) rwndEstimate(" "limit := math.Max(base, peerMax) * FQ_RWND_HDR" && infunc_code "$S" "func (sch *scheduler) rwndEstimate(" "FQ_RWND_DECAY" \
+  && ok "rwndEstimate: chan tren theo cua so toi da cua phia nhan + giam dan (sua rwnd)" || bad "rwndEstimate chua co chan tren peerMax x FQ_RWND_HDR / giam dan FQ_RWND_DECAY (sua rwnd)"
+infunc_code "$S" "func (sch *scheduler) learnFromAck(" "ps := dataPaths(s)" && infunc_code "$S" "func (sch *scheduler) learnFromAck(" "sch.lossEMA[pid] = 0.9" && ok "learnFromAck: N path + lossEMA" || bad "learnFromAck chua dung dataPaths / lossEMA"
+infunc_code "$S" "func (sch *scheduler) learnFromAck(" "if len(ps) == 2 {" && ok "learnFromAck: Q-table chi khi 2 path" || bad "learnFromAck: Q-table phai chi cap nhat khi len(ps) == 2"
+infunc_code "$S" "$UR" "bestID == 255" && ok "updateReliability: khong loai path cuoi cung" || bad "updateReliability thieu guard 'bestID == 255' (khong loai path cuoi cung)"
+infunc_code "$S" "func (sch *scheduler) probePaths(" "senderActive" && infunc_code "$S" "func (sch *scheduler) probePaths(" "FQ_POST_CLEAR" && ok "probePaths: chi tham do path im lang khi dang gui (muc 5), tham do day sau go co (muc 3)" || bad "probePaths thieu senderActive / FQ_POST_CLEAR"
+grep -q "sender=%t" "$S" && grep -q "rwndest=" "$S" && ok "PSTAT co loss/rwndest/sender" || bad "PSTAT thieu loss/rwndest/sender"
 
 echo "== 9. Code la ngoai thiet ke"
 [[ -f "$MQ/path_chooser.go" ]] && bad "co mp-quic/path_chooser.go (khong thuoc ban ghep; import internal/qsat)" || ok "khong co path_chooser.go"

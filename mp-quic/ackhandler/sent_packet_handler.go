@@ -45,6 +45,12 @@ var (
 
 var errPacketNumberNotIncreasing = errors.New("Already sent a packet with a higher packet number")
 
+// RTTSampleFromNewestAcked (FQSAT, mục 3): khi LargestAcked của ACK không nằm trong lịch sử
+// (ví dụ nó là một gói chỉ-có-ACK, không được theo dõi), lấy mẫu RTT từ gói mới nhất vừa được
+// xác nhận mà CÓ trong lịch sử (ví dụ PING thăm dò). Mặc định false => hành vi mp-quic gốc.
+// scheduler.setup() bật nó khi FQ_ENABLE = true.
+var RTTSampleFromNewestAcked = false
+
 type sentPacketHandler struct {
 	lastSentPacketNumber protocol.PacketNumber
 	skippedPackets       []protocol.PacketNumber
@@ -207,6 +213,14 @@ func (h *sentPacketHandler) ReceivedAck(ackFrame *wire.AckFrame, withPacketNumbe
 	ackedPackets, err := h.determineNewlyAckedPackets(ackFrame)
 	if err != nil {
 		return err
+	}
+
+	// FQSAT mục 3: trên path chỉ còn gói chỉ-có-ACK + PING thăm dò, LargestAcked hầu như không
+	// bao giờ là PING => không có mẫu RTT. Lấy mẫu từ gói mới nhất được xác nhận còn trong lịch sử.
+	if !rttUpdated && RTTSampleFromNewestAcked && len(ackedPackets) > 0 {
+		p := ackedPackets[len(ackedPackets)-1]
+		h.rttStats.UpdateRTT(rcvTime.Sub(p.Value.SendTime), ackFrame.DelayTime, time.Now())
+		h.congestion.MaybeExitSlowStart()
 	}
 
 	if len(ackedPackets) > 0 {
